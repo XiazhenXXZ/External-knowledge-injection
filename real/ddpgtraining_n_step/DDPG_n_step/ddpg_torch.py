@@ -1,0 +1,165 @@
+import os
+import numpy as np
+import torch as T
+import torch.nn.functional as F
+from DDPG_n_step.networks import ActorNetwork, CriticNetwork
+from DDPG_n_step.noise import OUActionNoise
+from DDPG_n_step.buffer import NStepReplayBuffer
+from collections import deque
+from gym import error, spaces, utils
+from constants_disassembly import *
+# from Impedance_controller import ImpedencecontrolEnv
+
+
+class Agent():
+    def __init__(self, alpha, beta, input_dims, tau, n_actions, gamma=0.99,
+                 max_size=1000000, fc1_dims=400, fc2_dims=300,
+                 batch_size=64, n_step=5):
+        # super(Agent, self).__init__()
+        
+        # alpha = 0.0001
+        # beta=0.001
+        # self.action_space = spaces.Box(
+        #     np.array([-0.01, -0.01, -0.01, -0.01, -0.01, -0.01]).astype(np.float32),
+        #     np.array([0.01, 0.01, 0.01, 0.01, 0.01, 0.01]).astype(np.float32)
+        # )
+
+        # # self.low = np.array([min_EEP_x, min_EEP_y, min_EEP_z,
+        # #                      min_Ori_r, min_Ori_p, min_Ori_y,
+        # #                      min_F_x, min_F_y, min_F_z,
+        # #                      min_T_x, min_T_y, min_T_z]).astype(np.float32)
+        # # self.high = np.array([max_EEP_x, max_EEP_y, max_EEP_z,
+        # #                       max_Ori_r, max_Ori_p, max_Ori_y,
+        # #                       max_F_x, max_F_y, max_F_z,
+        # #                       max_T_x, max_T_y, max_T_z]).astype(np.float32)
+        
+        # self.low = np.array([[min_EEP_x, min_EEP_y, min_EEP_z],
+        #                      [min_Ori_r, min_Ori_p, min_Ori_y],
+        #                      [min_F_x, min_F_y, min_F_z],
+        #                      [min_T_x, min_T_y, min_T_z]]).astype(np.float32)
+        # self.high = np.array([[max_EEP_x, max_EEP_y, max_EEP_z],
+        #                       [max_Ori_r, max_Ori_p, max_Ori_y],
+        #                       [max_F_x, max_F_y, max_F_z],
+        #                       [max_T_x, max_T_y, max_T_z]]).astype(np.float32)
+
+        # self.observation_space = spaces.Box(self.low, self.high)
+        # input_dims=self.observation_space.shape
+        # tau=0.001,
+        # n_actions=self.action_space.shape[0]
+        
+        self.gamma = gamma
+        self.tau = tau
+        self.batch_size = batch_size
+        self.alpha = alpha
+        self.beta = beta
+        self.n_step = n_step
+
+        self.memory = NStepReplayBuffer(max_size, input_dims, n_actions, n_step, gamma)
+
+        self.noise = OUActionNoise(mu=np.zeros(n_actions))
+
+        self.actor = ActorNetwork(alpha, input_dims, fc1_dims, fc2_dims,
+                                n_actions=n_actions, name='actor')
+        self.critic = CriticNetwork(beta, input_dims, fc1_dims, fc2_dims,
+                                n_actions=n_actions, name='critic')
+
+        self.target_actor = ActorNetwork(alpha, input_dims, fc1_dims, fc2_dims,
+                                n_actions=n_actions, name='target_actor')
+
+        self.target_critic = CriticNetwork(beta, input_dims, fc1_dims, fc2_dims,
+                                n_actions=n_actions, name='target_critic')
+
+        self.update_network_parameters(tau=1)
+
+    def choose_action(self, observation):
+        # print("obs4choose:", observation)
+        # print("choose")
+        self.actor.eval()
+        state = T.tensor([observation], dtype=T.float).to(self.actor.device)
+        mu = 0.005 * self.actor.forward(state).to(self.actor.device)
+        mu_prime = mu + T.tensor(self.noise(),
+                                    dtype=T.float).to(self.actor.device)
+        # mu_prime = mu
+        self.actor.train()
+
+        return mu_prime.cpu().detach().numpy()[0]
+
+    def remember(self, state, action, reward, state_, done):
+        self.memory.store_transition(state, action, reward, state_, done)
+
+    def learn(self):
+        if len(self.memory) < self.batch_size:
+            return
+
+        states, actions, rewards, states_, dones = \
+                self.memory.sample_buffer(self.batch_size)
+
+        states = T.tensor(states, dtype=T.float).to(self.actor.device)
+        states_ = T.tensor(states_, dtype=T.float).to(self.actor.device)
+        actions = T.tensor(actions, dtype=T.float).to(self.actor.device)
+        rewards = T.tensor(rewards, dtype=T.float).to(self.actor.device)
+        dones = T.tensor(dones).to(self.actor.device)
+
+        # Critic Value Calculation with n-step return
+        target_actions = self.target_actor.forward(states_)
+        critic_value_ = self.target_critic.forward(states_, target_actions)
+        critic_value = self.critic.forward(states, actions)
+
+        # n-step return
+        critic_value_[dones] = 0.0
+        critic_value_ = critic_value_.view(-1)
+        target = rewards + (self.gamma ** self.n_step) * critic_value_
+        target = target.view(self.batch_size, 1)
+
+        self.critic.optimizer.zero_grad()
+        critic_loss = F.mse_loss(target, critic_value)
+        critic_loss.backward()
+        self.critic.optimizer.step()
+
+        self.actor.optimizer.zero_grad()
+        actor_loss = -self.critic.forward(states, self.actor.forward(states)).mean()
+        actor_loss.backward()
+        self.actor.optimizer.step()
+        self.update_network_parameters()
+
+    def update_network_parameters(self, tau=None):
+        if tau is None:
+            tau = self.tau
+
+        actor_params = self.actor.named_parameters()
+        critic_params = self.critic.named_parameters()
+        target_actor_params = self.target_actor.named_parameters()
+        target_critic_params = self.target_critic.named_parameters()
+
+        critic_state_dict = dict(critic_params)
+        actor_state_dict = dict(actor_params)
+        target_critic_state_dict = dict(target_critic_params)
+        target_actor_state_dict = dict(target_actor_params)
+
+        for name in critic_state_dict:
+            critic_state_dict[name] = tau*critic_state_dict[name].clone() + \
+                                (1-tau)*target_critic_state_dict[name].clone()
+
+        for name in actor_state_dict:
+             actor_state_dict[name] = tau*actor_state_dict[name].clone() + \
+                                 (1-tau)*target_actor_state_dict[name].clone()
+
+        self.target_critic.load_state_dict(critic_state_dict)
+        self.target_actor.load_state_dict(actor_state_dict)
+
+
+
+    
+def choose_action(obs):
+    print("obs4action:", obs)
+    Agent().choose_action(obs)
+# 
+def learn():
+    Agent.learn
+
+def remember(state, action, reward, state_, done):
+    Agent.remember(state, action, reward, state_, done)
+
+
+
+
