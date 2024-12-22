@@ -1,0 +1,31 @@
+<?xml version="1.0" ?>
+<robot name="bar">
+
+<material name="silver">
+  <color rgba="0.700 0.700 0.700 1.000"/>
+</material>
+
+<link name="base_link">
+
+  <inertial>
+    <origin xyz="4.175964388207829e-17 -1.0439910970519572e-17 0.005" rpy="0 0 0"/>
+    <mass value="0.4355854682770655"/>
+    <inertia ixx="0.00037887239640157366" iyy="0.007460945692609496" izz="0.007832558331206453" ixy="-1.899008742933724e-34" iyz="0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="meshes/bar.obj" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+    <material/>
+  </visual>
+  <collision concave="yes">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="meshes/bar.obj" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+</robot>
